@@ -49,7 +49,8 @@
             HEGEL_SERVER_COMMAND = pkgs.lib.getExe hegel.packages.${system}.default;
 
             shellHook = ''
-              echo "zig $(zig version) development environment"
+              echo "zig $(zig version)"
+              echo "$($HEGEL_SERVER_COMMAND --version)"
             '';
           };
         }

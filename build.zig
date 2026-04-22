@@ -41,6 +41,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
 
+    const cbor = b.dependency("cbor", .{});
+    mod.addImport("cbor", cbor.module("cbor"));
+
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
     // to the module defined above, it's sometimes preferable to split business
@@ -79,6 +82,7 @@ pub fn build(b: *std.Build) void {
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
                 .{ .name = "hegel", .module = mod },
+                .{ .name = "cbor", .module = cbor.module("cbor") },
             },
         }),
     });

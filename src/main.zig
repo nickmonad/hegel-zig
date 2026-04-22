@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Io = std.Io;
+const cbor = @import("cbor");
 
 const CRC32 = std.hash.crc.Crc32;
 const hegel = @import("hegel");
@@ -13,16 +14,191 @@ const PACKET_REPLY_BIT: u32 = 1 << 31;
 
 const STREAM_ID_CONTROL: u31 = 0;
 
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
+    const alloc = init.arena.allocator();
+
+    var client: *Client = try alloc.create(Client);
+    try client.init(io, alloc);
+
+    assert(client.connection.initialized);
+    try client.send(.{ .stream_id = STREAM_ID_CONTROL, .message_id = 0, .payload = "hegel_handshake_start" });
+    client.deinit();
+}
+
+const Session = struct {
+    // TODO: This implementation is not thread-safe!
+    // We're currently assuming single-threaded test execution in Zig.
+    // This may change in the future, or we'll want to use this in a more generic way,
+    // so we'll need a thread-safe version.
+    // This includes the Client, as well! We'll need a thread-safe way to increment
+    // the "next" stream ID as we start test runs.
+    var io: ?Io = null;
+    var arena: ?std.heap.ArenaAllocator = null;
+    var client: ?*Client = null;
+
+    fn init(io_: Io, gpa: std.mem.Allocator) !void {
+        if (Session.io == null) {
+            Session.io = io_;
+        }
+
+        if (Session.arena == null) {
+            Session.arena = .init(gpa);
+        }
+
+        if (Session.client == null) {
+            var c = Session.arena.?.allocator().create(Client) catch unreachable;
+            try c.init(Session.io.?, Session.arena.?.allocator());
+
+            Session.client = c;
+        }
+    }
+
+    fn deinit() void {
+        Session.client.?.deinit();
+        Session.arena.?.deinit();
+    }
+};
+
+const TestOptions = struct {
+    skip: bool = false,
+    test_cases: u32 = 100,
+};
+
+/// Runs a Hegel test case, using std.testing.*
+/// values as the backing Io and Allocator instances.
+/// This can only be used in the context of a Zig test.
+///
+/// TODO: Create a TestCustom (better name?) that will accept
+/// arbitrary Io and Allocator instances. That will be useful
+/// if we want to create some kind of CLI to debug/inspect/play-around-with
+/// Hegel outside of a Zig test suite.
+fn Test(opts: TestOptions, comptime f: fn () void) !void {
+    if (opts.skip) return;
+
+    try Session.init(
+        std.testing.io,
+        std.testing.allocator,
+    );
+
+    // Create a test-level allocator.
+    // This will keep allocations for duration of a _single_ test case.
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    try Session.client.?.runTest(alloc, .{ .test_cases = opts.test_cases });
+
+    f();
+
+    Session.deinit();
+}
+
 const Client = struct {
-    connection: *Connection,
+    io: std.Io,
+    server: std.process.Child,
+    connection: Connection = undefined,
+    next_stream_id: u32 = 1,
+
+    const Self = @This();
+
+    const RunTestOptions = struct {
+        test_cases: u32,
+    };
+
+    fn init(client: *Self, io: Io, arena: std.mem.Allocator) !void {
+        // start Hegel server
+        // const cmd = env.getPosix("HEGEL_SERVER_COMMAND") orelse @panic("env var not set!");
+        // var env_cloned: std.process.Environ.Map = try .clone(env, gpa);
+        // try env_cloned.put("PYTHONUNBUFFERED", "1"); // force server to output immediately
+
+        const server: std.process.Child = try std.process.spawn(io, .{
+            .argv = &.{ "/nix/store/b2yqacm5h31irdpsmiizdhx0ybi19v8a-hegel-core-0.4.1/bin/hegel", "--stdio" },
+            .stdin = .pipe,
+            .stdout = .pipe,
+        });
+
+        std.debug.print("hegel server pid = {d}\n", .{server.id.?});
+
+        const buf_w = try arena.alloc(u8, 4096);
+        const buf_r = try arena.alloc(u8, 4096);
+
+        client.* = .{ .io = io, .server = server };
+
+        var w: Io.File.Writer = client.server.stdin.?.writer(io, buf_w);
+        var r: Io.File.Reader = client.server.stdout.?.reader(io, buf_r);
+
+        client.connection = try .init(&w.interface, &r.interface, arena);
+    }
+
+    fn deinit(self: *Self) void {
+        self.server.kill(self.io);
+    }
+
+    fn runTest(self: *Self, arena: std.mem.Allocator, opts: RunTestOptions) !void {
+        var buf: [1024]u8 = undefined;
+
+        const payload = try cbor.fmtBuf(&buf, .{
+            .command = "run_test",
+            .stream_id = self.next_stream_id,
+            .test_cases = opts.test_cases,
+        });
+
+        // keep the next client-generated stream ID odd
+        self.next_stream_id += 2;
+
+        std.debug.print("payload = {s}\n", .{payload});
+        const request: Packet = .{
+            .stream_id = STREAM_ID_CONTROL,
+            .message_id = 0,
+            .payload = payload,
+        };
+
+        // TODO: probably need some timeouts around these
+        // revisit when there's some real concurrency
+        try self.send(request);
+        const reply: Packet = try self.wait(arena);
+
+        assert(reply.stream_id == request.stream_id);
+        assert(reply.is_reply);
+        assert(try cbor.match(reply.payload, true));
+    }
+
+    fn send(self: *Self, p: Packet) !void {
+        return p.write(self.connection.writer);
+    }
+
+    /// Wait for a response Packet from the server.
+    /// Caller owns Packet payload, using provided allocator.
+    fn wait(self: *Self, alloc: std.mem.Allocator) !Packet {
+        return try .read(self.connection.reader, alloc);
+    }
 };
 
 const Connection = struct {
     writer: *Io.Writer,
     reader: *Io.Reader,
+    initialized: bool = false,
 
-    fn init(w: *Io.Writer, r: *Io.Reader) !Connection {
-        return .{ .writer = w, .reader = r };
+    const Self = @This();
+
+    fn init(w: *Io.Writer, r: *Io.Reader, arena: std.mem.Allocator) !Self {
+        // initialize with a (synchonrous) handshake to the server
+        const handshake: Packet = .{
+            .stream_id = STREAM_ID_CONTROL,
+            .message_id = 0,
+            .payload = "hegel_handshake_start",
+        };
+
+        try handshake.write(w);
+        const reply: Packet = try .read(r, arena);
+        defer arena.free(reply.payload);
+
+        assert(reply.stream_id == handshake.stream_id);
+        assert(reply.message_id == handshake.message_id);
+        assert(reply.is_reply);
+
+        return .{ .writer = w, .reader = r, .initialized = true };
     }
 };
 
@@ -128,49 +304,6 @@ const Packet = struct {
     }
 };
 
-pub fn main(init: std.process.Init) !void {
-    const alloc = init.arena.allocator();
-    const io = init.io;
-
-    const cmd = init.environ_map.get("HEGEL_SERVER_COMMAND") orelse @panic("env var not set!");
-
-    // set unbuffered output from python process
-    var env: std.process.Environ.Map = try .clone(init.environ_map, alloc);
-    try env.put("PYTHONUNBUFFERED", "1");
-
-    var server: std.process.Child = try std.process.spawn(io, .{
-        .argv = &.{ cmd, "--stdio" },
-        .environ_map = &env,
-        .stdin = .pipe,
-        .stdout = .pipe,
-    });
-
-    std.debug.print("hegel command = {s}\n", .{cmd});
-    std.debug.print("hegel server pid = {d}\n", .{server.id.?});
-
-    const buf_w = try alloc.alloc(u8, 1024);
-    const buf_r = try alloc.alloc(u8, 1024);
-
-    var w: Io.File.Writer = server.stdin.?.writer(io, buf_w);
-    var r: Io.File.Reader = server.stdout.?.reader(io, buf_r);
-
-    const handshake: Packet = .{
-        .stream_id = STREAM_ID_CONTROL,
-        .message_id = 0,
-        .payload = "hegel_handshake_start",
-    };
-
-    try handshake.write(&w.interface);
-    const reply: Packet = try .read(&r.interface, alloc);
-
-    assert(reply.stream_id == handshake.stream_id);
-    assert(reply.message_id == handshake.message_id);
-    assert(reply.is_reply);
-    assert(std.mem.eql(u8, reply.payload, "Hegel/0.10"));
-
-    server.kill(io);
-}
-
 fn hexdump(data: []const u8) void {
     const print = std.debug.print;
 
@@ -255,14 +388,10 @@ test "packet round trip" {
     }
 }
 
-fn run(a: u32, f: *const fn (a: u32) void) void {
-    f(a);
-}
-
 test "hegel" {
-    run(10, struct {
-        fn f(a: u32) void {
-            assert(a == 10);
+    try Test(.{}, struct {
+        fn f() void {
+            return;
         }
     }.f);
 }

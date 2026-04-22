@@ -61,6 +61,11 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        .cbor = .{
+            // v1.2.0
+            .url = "git+https://github.com/neurocyte/cbor#8f37f71439f62b513b9d52a76d6af012395ee47c",
+            .hash = "cbor-1.2.0-RcQE_NtLAQCkBF-LFNB_XsGIycs6pjhCYicxEq0QzYfe",
+        },
     },
     // Specifies the set of files and directories that are included in this package.
     // Only files and directories listed here are included in the `hash` that
