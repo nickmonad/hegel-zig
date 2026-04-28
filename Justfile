@@ -8,7 +8,7 @@ build:
     zig build
 
 test:
-    zig build test
+    zig build test --summary all
 
 hegel cmd='version':
     @just hegel-{{ cmd }}

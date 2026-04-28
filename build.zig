@@ -21,6 +21,8 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
+    const cbor = b.dependency("cbor", .{});
+
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -39,10 +41,12 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .imports = &.{
+            .{ .name = "cbor", .module = cbor.module("cbor") },
+        },
     });
 
-    const cbor = b.dependency("cbor", .{});
-    mod.addImport("cbor", cbor.module("cbor"));
+    // mod.addImport("cbor", cbor.module("cbor"));
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -127,7 +131,10 @@ pub fn build(b: *std.Build) void {
     });
 
     // A run step that will run the test executable.
-    const run_mod_tests = b.addRunArtifact(mod_tests);
+    var run_mod_tests = b.addRunArtifact(mod_tests);
+    // NOTE(nickmonad): I don't really know if this is needed or not.
+    // I observed that the hegel server is spawned with and without it...
+    run_mod_tests.has_side_effects = true;
 
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
