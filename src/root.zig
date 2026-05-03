@@ -55,7 +55,7 @@ const TestOptions = struct {
 /// arbitrary Io and Allocator instances. That will be useful
 /// if we want to create some kind of CLI to debug/inspect/play-around-with
 /// Hegel outside of a Zig test suite.
-fn Test(opts: TestOptions, comptime run: fn (TestCase) anyerror!void) !void {
+fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
     if (opts.skip) return;
 
     try Session.init(
@@ -63,49 +63,104 @@ fn Test(opts: TestOptions, comptime run: fn (TestCase) anyerror!void) !void {
         std.testing.allocator,
     );
 
-    // Create a test-level allocator.
-    // This will keep allocations for duration of a _single_ test case.
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
+    var client = Session.client.?;
+    const run = try client.testRun(.{ .test_cases = opts.test_cases });
 
-    _ = try Session.client.?.runTest(
-        run,
-        arena.allocator(),
-        .{ .test_cases = opts.test_cases },
-    );
+    while (true) {
+        switch (try run.event()) {
+            .case => |tc| {
+                // TODO: tc.ack() (see note about deadlock in hegel-rust??)
+                // need to reply to proper message_id
+                // TODO: handle error and update status
+                func(tc) catch unreachable;
+                try tc.complete(.{ .status = .valid });
+            },
+            .done => |done| {
+                // TODO: do something with test results?
+                _ = done;
+                break;
+            },
+        }
+    }
 
     Session.deinit();
 }
 
-const RunTestReply = struct {
-    result: bool,
-};
+const TestRun = struct {
+    client: *Client,
 
-const TestCaseEvent = struct {
-    event: []const u8,
     stream_id: u32,
-    is_final: bool,
-};
+    options: Options,
 
-const TestDoneEvent = struct {
-    event: []const u8,
-    results: TestResults,
-};
+    const Options = struct {
+        test_cases: u32,
+    };
 
-const TestResults = struct {
-    passed: bool,
-    test_cases: u32,
-    valid_test_cases: u32,
-    invalid_test_cases: u32,
-    interesting_test_cases: u32,
-    seed: []const u8,
-    failure_blobs: []const []const u8,
+    const Reply = struct {
+        result: bool,
+    };
+
+    const Event = union(enum) {
+        case: TestCase,
+        done: TestDone,
+
+        fn read(
+            packet: Packet,
+            arena: std.mem.Allocator,
+            client: *Client,
+        ) !?Event {
+            var test_case: TestCase.Event = undefined;
+            if (try cbor.match(packet.payload, cbor.extractAlloc(&test_case, arena))) {
+                // Prepare and send test_case_reply!
+                // NOTE(nickmonad): hegel-rust mentions this as critical step to "prevent deadlock".
+                // It's not clear to me if this is a deadlock in hegel-rust, or the hegel-core server.
+                const test_case_reply: Packet = try .encode(
+                    arena,
+                    .{
+                        .stream_id = packet.stream_id,
+                        .message_id = packet.message_id,
+                        .is_reply = true,
+                    },
+                    .{
+                        .result = null,
+                    },
+                );
+
+                try client.send(test_case_reply);
+
+                return .{
+                    .case = .{
+                        .client = client,
+                        .stream_id = test_case.stream_id,
+                    },
+                };
+            }
+
+            var test_done: TestDone.Event = undefined;
+            if (try cbor.match(packet.payload, cbor.extractAlloc(&test_done, arena))) {
+                return .{
+                    .done = test_done.results,
+                };
+            }
+
+            return null;
+        }
+    };
+
+    pub fn event(self: TestRun) !Event {
+        return self.client.receive(self.stream_id, Event, Event.read);
+    }
 };
 
 const TestCase = struct {
     client: *Client,
-    arena: std.mem.Allocator,
     stream_id: u32,
+
+    const Event = struct {
+        event: []const u8,
+        stream_id: u32,
+        is_final: bool,
+    };
 
     const Status = enum {
         valid,
@@ -116,41 +171,99 @@ const TestCase = struct {
     const Result = struct {
         status: Status,
         origin: ?std.builtin.SourceLocation = null,
+    };
 
-        fn encodeComplete(self: Result, arena: std.mem.Allocator) ![]const u8 {
-            var w: Io.Writer.Allocating = .init(arena);
-            try cbor.writeValue(&w.writer, .{
+    fn draw(self: TestCase, comptime G: type) !@FieldType(G, "generated") {
+        const generator: G = .{};
+        const generate: Packet = try .encode(
+            self.client.arena,
+            .{ .stream_id = self.stream_id },
+            .{
+                .command = "generate",
+                .schema = generator.schema(),
+            },
+        );
+
+        try self.client.send(generate);
+        return self.client.receive(self.stream_id, @FieldType(G, "generated"), G.read);
+    }
+
+    fn complete(self: TestCase, result: Result) !void {
+        const mark_complete: Packet = try .encode(
+            self.client.arena,
+            .{ .stream_id = self.stream_id },
+            .{
                 .command = "mark_complete",
-                .status = switch (self.status) {
+                .status = switch (result.status) {
                     .valid => "VALID",
                     .invalid => "INVALID",
                     .interesting => "INTERESTING",
                 },
+                .origin = null,
                 // TODO: .origin (when interesting)
-            });
-
-            return w.toOwnedSlice();
-        }
-    };
-
-    fn draw(self: TestCase) void {
-        var w: Io.Writer.Allocating = .init(self.arena);
-        cbor.writeValue(&w.writer, .{
-            .command = "generate",
-            .schema = .{
-                .type = "constant",
-                .value = 10,
             },
-        }) catch unreachable;
+        );
 
-        const p: Packet = .{
-            .stream_id = self.stream_id,
-            .message_id = 1,
-            .payload = w.written(),
+        // TODO: do we care about "mark_complete_reply"?
+        return self.client.send(mark_complete);
+    }
+};
+
+fn IntOptions(comptime T: type) type {
+    return struct {
+        min: ?T = null,
+        max: ?T = null,
+    };
+}
+
+fn Int(comptime T: type, opts: IntOptions(T)) type {
+    return struct {
+        const Self = @This();
+
+        generated: T = undefined,
+        opts: IntOptions(T) = opts,
+
+        const Schema = struct {
+            type: []const u8 = "integer",
+            min_value: ?T,
+            max_value: ?T,
         };
 
-        self.client.send(p) catch unreachable;
-    }
+        const Result = struct {
+            result: T,
+        };
+
+        fn schema(self: Self) Schema {
+            return .{
+                .min_value = self.opts.min,
+                .max_value = self.opts.max,
+            };
+        }
+
+        fn read(packet: Packet, alloc: std.mem.Allocator, _: *Client) !?T {
+            var result: Result = undefined;
+            if (try cbor.match(packet.payload, cbor.extractAlloc(&result, alloc))) {
+                return result.result;
+            }
+
+            return null;
+        }
+    };
+}
+
+const TestDone = struct {
+    passed: bool,
+    test_cases: u32,
+    valid_test_cases: u32,
+    invalid_test_cases: u32,
+    interesting_test_cases: u32,
+    seed: []const u8,
+    failure_blobs: []const []const u8,
+
+    const Event = struct {
+        event: []const u8,
+        results: TestDone,
+    };
 };
 
 const TestCaseReply = struct {
@@ -160,22 +273,30 @@ const TestCaseReply = struct {
 
 pub const Client = struct {
     io: std.Io,
+    arena: std.mem.Allocator,
+
     server: std.process.Child,
     connection: Connection = undefined,
     next_stream_id: u32 = 1,
+    streams: std.AutoHashMap(u32, Stream),
 
     const Self = @This();
 
-    const RunTestOptions = struct {
-        test_cases: u32,
+    const Stream = struct {
+        id: u32,
+        next_message_id: u31 = 1,
+        queue: std.DoublyLinkedList = .{},
     };
 
-    pub fn init(client: *Self, io: Io, arena: std.mem.Allocator) !void {
-        // start Hegel server
-        // const cmd = env.getPosix("HEGEL_SERVER_COMMAND") orelse @panic("env var not set!");
-        // var env_cloned: std.process.Environ.Map = try .clone(env, gpa);
-        // try env_cloned.put("PYTHONUNBUFFERED", "1"); // force server to output immediately
+    const QueueItem = struct {
+        node: std.DoublyLinkedList.Node,
+        packet: Packet,
+    };
 
+    /// Initialize Hegel client. The client spawns the server and opens a connection
+    /// over stdin/stdout. The provided arena allocator is for the entire test session,
+    /// so the client is not responsible for freeing any memory allocated in it.
+    pub fn init(self: *Self, io: Io, arena: std.mem.Allocator) !void {
         var env: std.process.Environ.Map = .init(arena);
         try env.put("PYTHONUNBUFFERED", "1");
 
@@ -197,24 +318,69 @@ pub const Client = struct {
         const buf_w = try arena.alloc(u8, 4096);
         const buf_r = try arena.alloc(u8, 4096);
 
-        client.* = .{ .io = io, .server = server };
+        self.* = .{
+            .io = io,
+            .arena = arena,
+            .server = server,
+            .streams = .init(arena),
+        };
 
-        const w: Io.File.Writer = client.server.stdin.?.writer(io, buf_w);
-        const r: Io.File.Reader = client.server.stdout.?.reader(io, buf_r);
+        const w: Io.File.Writer = self.server.stdin.?.writer(io, buf_w);
+        const r: Io.File.Reader = self.server.stdout.?.reader(io, buf_r);
 
-        client.connection = try .init(w, r, arena);
+        self.connection = try .init(w, r, arena);
     }
 
     pub fn deinit(self: *Self) void {
         self.server.kill(self.io);
     }
 
-    pub fn runTest(
+    fn send(self: *Self, p: Packet) !void {
+        const entry = try self.streams.getOrPutValue(p.stream_id, .{ .id = p.stream_id });
+        var stream: *Stream = entry.value_ptr;
+
+        const message_id = stream.next_message_id;
+        stream.next_message_id += 1;
+
+        var copied: Packet = p;
+        copied.message_id = message_id;
+
+        return copied.write(&self.connection.writer.interface);
+    }
+
+    fn reply(self: *Self, p: Packet) !void {
+        assert(p.message_id.? >= 0);
+        return p.write(&self.connection.writer.interface);
+    }
+
+    fn receive(
         self: *Self,
-        comptime f: fn (TestCase) anyerror!void,
-        arena: std.mem.Allocator,
-        opts: RunTestOptions,
-    ) !?TestResults {
+        on_stream_id: u32,
+        comptime T: type,
+        comptime read: fn (Packet, std.mem.Allocator, *Self) anyerror!?T,
+    ) !T {
+        // NOTE: We depend heavily on liveness here! The server must be
+        // responding with packets we expect, otherwise we'll get stuck waiting here.
+        // Some kind of timeout mechanism will eventually be needed.
+
+        // TODO: check if we already have a packet matching T on the queue
+        _ = on_stream_id;
+
+        while (true) {
+            const packet: Packet = try .read(
+                &self.connection.reader.interface,
+                self.arena,
+            );
+
+            if (try read(packet, self.arena, self)) |value| {
+                return value;
+            }
+
+            // TODO: queue unexpected and loop again
+        }
+    }
+
+    pub fn testRun(self: *Self, opts: TestRun.Options) !TestRun {
         const stream_test = s: {
             const id = self.next_stream_id;
             // keep the next client-generated stream ID odd
@@ -222,81 +388,25 @@ pub const Client = struct {
             break :s id;
         };
 
-        var w: Io.Writer.Allocating = .init(arena);
-        try cbor.writeValue(&w.writer, .{
-            .command = "run_test",
-            .stream_id = stream_test,
-            .test_cases = opts.test_cases,
-        });
+        const run_test: Packet = try .encode(
+            self.arena,
+            .{ .stream_id = STREAM_CONTROL },
+            .{ .command = "run_test", .stream_id = stream_test, .test_cases = opts.test_cases },
+        );
 
-        const run_test: Packet = .{
-            .stream_id = STREAM_CONTROL,
-            .message_id = 1,
-            .payload = w.written(),
-        };
-
-        // initiate test!
         try self.send(run_test);
+        // TODO: do we actually care about waiting on the run_test_reply?
+        // If so, we need a client.wait(.{ .stream_id = 0 }) or something to that effect
 
-        while (true) {
-            const p: Packet = try self.wait(arena);
-
-            var reply: RunTestReply = undefined;
-            if (try cbor.match(p.payload, cbor.extractAlloc(&reply, arena))) {
-                // do nothing...
-                // TODO: shouldn't need to really care about this with improved stream handling
-                continue;
-            }
-
-            var test_case: TestCaseEvent = undefined;
-            if (try cbor.match(p.payload, cbor.extractAlloc(&test_case, arena))) {
-                // NOTE: ACK test case event BEFORE running test (prevents deadlock)
-                var wn: Io.Writer.Allocating = .init(arena);
-                const tc_reply: TestCaseReply = .{};
-                try cbor.writeValue(&wn.writer, tc_reply);
-
-                try self.send(.{
-                    .stream_id = stream_test,
-                    .message_id = p.message_id,
-                    .is_reply = true,
-                    .payload = wn.written(),
-                });
-
-                // execute test case
-                const tc: TestCase = .{
-                    .client = self,
-                    .arena = arena,
-                    .stream_id = test_case.stream_id,
-                };
-
-                try f(tc);
-                const result: TestCase.Result = .{ .status = .valid };
-                const mark_complete: Packet = .{
-                    .stream_id = test_case.stream_id,
-                    .message_id = p.message_id + 1,
-                    .payload = try result.encodeComplete(arena),
-                };
-
-                // complete test case
-                // NOTE: currently we are not "waiting" for the mark_complete_reply.
-                // it's caught in the loop as an "unchecked" message
-                try self.send(mark_complete);
-                continue;
-            }
-
-            var test_done: TestDoneEvent = undefined;
-            if (try cbor.match(p.payload, cbor.extractAlloc(&test_done, arena))) {
-                std.debug.print("got test_done\n", .{});
-                return test_done.results;
-            }
-
-            p.debug("unchecked", arena);
-        }
-
-        return null;
+        return .{
+            .client = self,
+            .stream_id = stream_test,
+            .options = opts,
+        };
     }
 
     fn streamClose(self: *Self, stream_id: u32) !void {
+        // TODO: remove stream entry from queue map
         const p: Packet = .{
             .stream_id = stream_id,
             .message_id = (1 << 31) - 1,
@@ -304,16 +414,6 @@ pub const Client = struct {
         };
 
         try self.send(p);
-    }
-
-    fn send(self: *Self, p: Packet) !void {
-        return p.write(&self.connection.writer.interface);
-    }
-
-    /// Wait for a response Packet from the server.
-    /// Caller owns Packet payload, using provided allocator.
-    fn wait(self: *Self, alloc: std.mem.Allocator) !Packet {
-        return try .read(&self.connection.reader.interface, alloc);
     }
 };
 
@@ -349,18 +449,41 @@ const Connection = struct {
 
 const Packet = struct {
     stream_id: u32,
-    message_id: u31,
+    // Message ID can be null while constructing a Packet!
+    // This isn't ideal, but it allows us to defer setting the message ID at the client layer,
+    // where the generation and sequence can be controlled in one place.
+    // It is assumed to be set in .write()
+    message_id: ?u31 = null,
     is_reply: bool = false,
     payload: []const u8,
 
     const Self = @This();
 
+    const Meta = struct {
+        stream_id: u32,
+        message_id: ?u31 = null,
+        is_reply: bool = false,
+    };
+
+    fn encode(arena: std.mem.Allocator, meta: Meta, value: anytype) !Self {
+        var w: Io.Writer.Allocating = .init(arena);
+        try cbor.writeValue(&w.writer, value);
+
+        return .{
+            .stream_id = meta.stream_id,
+            .message_id = meta.message_id,
+            .is_reply = meta.is_reply,
+            .payload = w.written(),
+        };
+    }
+
     fn write(self: Self, w: *Io.Writer) !void {
+        // NOTE: message_id must be set (non-null).
         const message_id = id: {
             if (self.is_reply) {
-                break :id @as(u32, self.message_id) | PACKET_REPLY_BIT;
+                break :id @as(u32, self.message_id.?) | PACKET_REPLY_BIT;
             } else {
-                break :id @as(u32, self.message_id);
+                break :id @as(u32, self.message_id.?);
             }
         };
 
@@ -453,7 +576,7 @@ const Packet = struct {
 
         std.debug.print("Packet ({s}) {{\n", .{name});
         std.debug.print("  stream_id = {d}\n", .{self.stream_id});
-        std.debug.print("  message_id = {d}\n", .{self.message_id});
+        std.debug.print("  message_id = {any}\n", .{self.message_id});
         std.debug.print("  is_reply = {any}\n", .{self.is_reply});
         std.debug.print("  payload = {s}\n", .{
             if (is_cbor)
@@ -550,9 +673,12 @@ test "packet round trip" {
 }
 
 test "hegel" {
-    try Test(.{ .test_cases = 1 }, struct {
+    try Test(.{ .test_cases = 10 }, struct {
         fn run(tc: TestCase) anyerror!void {
-            tc.draw();
+            const a = try tc.draw(Int(u32, .{ .min = 10, .max = 100 }));
+            const b = try tc.draw(Int(u32, .{ .min = 10, .max = 100 }));
+
+            try std.testing.expectEqual(a + b, b + a);
         }
     }.run);
 }
