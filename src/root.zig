@@ -20,6 +20,7 @@ const Session = struct {
     // the "next" stream ID as we start test runs.
     var io: ?Io = null;
     var arena: ?std.heap.ArenaAllocator = null;
+    var log: ?Io.File = null;
     var client: ?*Client = null;
     var initialized: bool = false;
 
@@ -28,9 +29,10 @@ const Session = struct {
 
         Session.io = io_;
         Session.arena = .init(gpa);
+        Session.log = try Io.Dir.cwd().createFile(io_, "hegel.log", .{ .truncate = true });
 
         var c = Session.arena.?.allocator().create(Client) catch unreachable;
-        try c.init(Session.io.?, Session.arena.?.allocator());
+        try c.init(Session.io.?, Session.arena.?.allocator(), Session.log.?);
 
         Session.client = c;
         Session.initialized = true;
@@ -56,12 +58,10 @@ const TestOptions = struct {
 /// if we want to create some kind of CLI to debug/inspect/play-around-with
 /// Hegel outside of a Zig test suite.
 fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
-    if (opts.skip) return;
+    try Session.init(std.testing.io, std.testing.allocator);
+    defer Session.deinit();
 
-    try Session.init(
-        std.testing.io,
-        std.testing.allocator,
-    );
+    if (opts.skip) return;
 
     var client = Session.client.?;
     const run = try client.testRun(.{ .test_cases = opts.test_cases });
@@ -82,8 +82,6 @@ fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
             },
         }
     }
-
-    Session.deinit();
 }
 
 const TestRun = struct {
@@ -296,7 +294,7 @@ pub const Client = struct {
     /// Initialize Hegel client. The client spawns the server and opens a connection
     /// over stdin/stdout. The provided arena allocator is for the entire test session,
     /// so the client is not responsible for freeing any memory allocated in it.
-    pub fn init(self: *Self, io: Io, arena: std.mem.Allocator) !void {
+    pub fn init(self: *Self, io: Io, arena: std.mem.Allocator, log: Io.File) !void {
         var env: std.process.Environ.Map = .init(arena);
         try env.put("PYTHONUNBUFFERED", "1");
 
@@ -310,7 +308,7 @@ pub const Client = struct {
             .environ_map = &env,
             .stdin = .pipe,
             .stdout = .pipe,
-            .stderr = .inherit,
+            .stderr = .{ .file = log },
         });
 
         // std.debug.print("hegel server pid = {d}\n", .{server.id.?});
