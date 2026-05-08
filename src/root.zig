@@ -387,8 +387,28 @@ pub const Client = struct {
         comptime T: type,
         comptime read: fn (Packet, std.mem.Allocator, *Self) anyerror!?T,
     ) !T {
-        // TODO: check if we already have a packet matching T on the queue
-        _ = on_stream_id;
+        // Check if there's already a packet matching T on the stream's queue.
+        const entry = try self.streams.getOrPutValue(on_stream_id, .{ .id = on_stream_id });
+        var stream: *Stream = entry.value_ptr;
+
+        if (stream.queue.first) |first| {
+            var current: ?*std.DoublyLinkedList.Node = first;
+
+            while (current) |node| {
+                const item: *QueueItem = @fieldParentPtr("node", node);
+                if (try read(item.packet, self.arena, self)) |value| {
+                    // Packet matches expected type T.
+                    // Remove from queue and return.
+                    //
+                    // NOTE(nickmonad): We currently don't destroy the removed QueueItem, since we're allocated
+                    // into an arena. This might have to change on very long test runs.
+                    stream.queue.remove(node);
+                    return value;
+                }
+
+                current = item.node.next;
+            }
+        }
 
         while (true) {
             const packet: Packet = try .read(
@@ -400,7 +420,14 @@ pub const Client = struct {
                 return value;
             }
 
-            // TODO: queue unexpected and loop again
+            // Queue the non-matching packet and wait for another.
+            var item: *QueueItem = try self.arena.create(QueueItem);
+            item.* = .{
+                .node = .{},
+                .packet = packet,
+            };
+
+            stream.queue.append(&item.node);
         }
     }
 
