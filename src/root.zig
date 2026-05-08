@@ -23,6 +23,7 @@ const Session = struct {
     var log: ?Io.File = null;
     var client: ?*Client = null;
     var initialized: bool = false;
+    var test_count: u32 = 0;
 
     fn init(io_: Io, gpa: std.mem.Allocator) !void {
         if (Session.initialized) return;
@@ -31,8 +32,10 @@ const Session = struct {
         Session.arena = .init(gpa);
         Session.log = try Io.Dir.cwd().createFile(io_, "hegel.log", .{ .truncate = true });
 
-        var c = Session.arena.?.allocator().create(Client) catch unreachable;
-        try c.init(Session.io.?, Session.arena.?.allocator(), Session.log.?);
+        const alloc = Session.arena.?.allocator();
+
+        var c = alloc.create(Client) catch unreachable;
+        try c.init(Session.io.?, alloc, Session.log.?);
 
         Session.client = c;
         Session.initialized = true;
@@ -46,6 +49,7 @@ const Session = struct {
 
 const TestOptions = struct {
     skip: bool = false,
+    name: ?[]const u8 = null,
     test_cases: u32 = 100,
 };
 
@@ -69,11 +73,11 @@ fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
     while (true) {
         switch (try run.event()) {
             .case => |tc| {
-                // TODO: tc.ack() (see note about deadlock in hegel-rust??)
-                // need to reply to proper message_id
                 // TODO: handle error and update status
                 func(tc) catch unreachable;
+
                 try tc.complete(.{ .status = .valid });
+                try client.streamClose(tc.stream_id);
             },
             .done => |done| {
                 // TODO: do something with test results?
@@ -125,7 +129,6 @@ const TestRun = struct {
                 );
 
                 try client.send(test_case_reply);
-
                 return .{
                     .case = .{
                         .client = client,
@@ -136,6 +139,19 @@ const TestRun = struct {
 
             var test_done: TestDone.Event = undefined;
             if (try cbor.match(packet.payload, cbor.extractAlloc(&test_done, arena))) {
+                const test_done_reply: Packet = try .encode(
+                    arena,
+                    .{
+                        .stream_id = packet.stream_id,
+                        .message_id = packet.message_id,
+                        .is_reply = true,
+                    },
+                    .{
+                        .result = true,
+                    },
+                );
+
+                try client.send(test_done_reply);
                 return .{
                     .done = test_done.results,
                 };
@@ -202,8 +218,14 @@ const TestCase = struct {
             },
         );
 
-        // TODO: do we care about "mark_complete_reply"?
-        return self.client.send(mark_complete);
+        // send...
+        try self.client.send(mark_complete);
+
+        // TODO(nickmonad): wait for mark_complete_reply?
+        // Currently, for some our a test cases, we're not getting a mark_complete_reply
+        // in a format documented in the protocol reference.
+        // Instead of { 'result': null }, we get { 'error': 'N', 'type': 'StopTest' }.
+        // Apparently, we can ignore these for now, but more investigation is needed!
     }
 };
 
@@ -262,11 +284,6 @@ const TestDone = struct {
         event: []const u8,
         results: TestDone,
     };
-};
-
-const TestCaseReply = struct {
-    // This should always be null, and therefore, never set explicity by the client.
-    result: ?bool = null,
 };
 
 pub const Client = struct {
@@ -340,8 +357,9 @@ pub const Client = struct {
         const message_id = stream.next_message_id;
         stream.next_message_id += 1;
 
+        // copy packet, keeping message_id if already set
         var copied: Packet = p;
-        copied.message_id = message_id;
+        copied.message_id = if (p.message_id) |id| id else message_id;
 
         return copied.write(&self.connection.writer.interface);
     }
@@ -351,16 +369,24 @@ pub const Client = struct {
         return p.write(&self.connection.writer.interface);
     }
 
+    /// Waits on given stream ID until the expected packet payload of type T arrives. This function is "cooperative",
+    /// in the sense that if it sees a packet it does not expect (on a different stream or of the wrong type)
+    /// it will store the packet in the client's stream queue. All calls to this function will first check
+    /// if there's an expected packet of type T on the queue, before going into a blocking wait state.
+    ///
+    /// Because of this, we depend heavily on the server's "liveness". The server MUST be responding with
+    /// packets we expect of the correct type, otherwise we'll sit in a blocking state forever and won't
+    /// allow the test run to progress. Ideally, we'll introduce some kind of timeout mechanism here, but
+    /// that's a problem for another day. This would also (have to) be alleviated in a multi-threaded context, which
+    /// we don't yet support.
+    ///
+    /// The given read function must return `null` if the provided packet does not match the expected type/shape.
     fn receive(
         self: *Self,
         on_stream_id: u32,
         comptime T: type,
         comptime read: fn (Packet, std.mem.Allocator, *Self) anyerror!?T,
     ) !T {
-        // NOTE: We depend heavily on liveness here! The server must be
-        // responding with packets we expect, otherwise we'll get stuck waiting here.
-        // Some kind of timeout mechanism will eventually be needed.
-
         // TODO: check if we already have a packet matching T on the queue
         _ = on_stream_id;
 
@@ -405,13 +431,13 @@ pub const Client = struct {
 
     fn streamClose(self: *Self, stream_id: u32) !void {
         // TODO: remove stream entry from queue map
-        const p: Packet = .{
+        const stream_close: Packet = .{
             .stream_id = stream_id,
             .message_id = (1 << 31) - 1,
             .payload = &.{0xFE},
         };
 
-        try self.send(p);
+        try self.send(stream_close);
     }
 };
 
@@ -451,7 +477,7 @@ const Packet = struct {
     // This isn't ideal, but it allows us to defer setting the message ID at the client layer,
     // where the generation and sequence can be controlled in one place.
     // It is assumed to be set in .write()
-    message_id: ?u31 = null,
+    message_id: ?u32 = null,
     is_reply: bool = false,
     payload: []const u8,
 
@@ -459,7 +485,7 @@ const Packet = struct {
 
     const Meta = struct {
         stream_id: u32,
-        message_id: ?u31 = null,
+        message_id: ?u32 = null,
         is_reply: bool = false,
     };
 
@@ -479,9 +505,9 @@ const Packet = struct {
         // NOTE: message_id must be set (non-null).
         const message_id = id: {
             if (self.is_reply) {
-                break :id @as(u32, self.message_id.?) | PACKET_REPLY_BIT;
+                break :id (self.message_id.? | PACKET_REPLY_BIT);
             } else {
-                break :id @as(u32, self.message_id.?);
+                break :id self.message_id.?;
             }
         };
 
@@ -559,7 +585,7 @@ const Packet = struct {
 
         // coerce message_id
         const is_reply = raw_message_id & PACKET_REPLY_BIT != 0;
-        const message_id: u31 = @truncate(raw_message_id & ~PACKET_REPLY_BIT);
+        const message_id: u32 = raw_message_id & ~PACKET_REPLY_BIT;
 
         return .{
             .stream_id = raw_stream_id,
@@ -673,8 +699,8 @@ test "packet round trip" {
 test "hegel" {
     try Test(.{ .test_cases = 10 }, struct {
         fn run(tc: TestCase) anyerror!void {
-            const a = try tc.draw(Int(u32, .{ .min = 10, .max = 100 }));
-            const b = try tc.draw(Int(u32, .{ .min = 10, .max = 100 }));
+            const a = try tc.draw(Int(u64, .{ .min = 10, .max = 1000 }));
+            const b = try tc.draw(Int(u64, .{ .min = 10, .max = 1000 }));
 
             try std.testing.expectEqual(a + b, b + a);
         }
