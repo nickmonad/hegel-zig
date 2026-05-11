@@ -69,6 +69,7 @@ fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
 
     var client = Session.client.?;
     const run = try client.testRun(.{ .test_cases = opts.test_cases });
+    var results: ?TestDone = null;
 
     while (true) {
         switch (try run.event()) {
@@ -80,11 +81,19 @@ fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
                 try client.streamClose(tc.stream_id);
             },
             .done => |done| {
-                // TODO: do something with test results?
-                _ = done;
+                results = done;
                 break;
             },
         }
+    }
+
+    // Run each final test case.
+    for (0..results.?.interesting_test_cases) |_| {
+        const tc = try run.replay();
+        func(tc) catch unreachable;
+
+        try tc.complete(.{ .status = .valid });
+        try client.streamClose(tc.stream_id);
     }
 }
 
@@ -133,6 +142,7 @@ const TestRun = struct {
                     .case = .{
                         .client = client,
                         .stream_id = test_case.stream_id,
+                        .is_final = test_case.is_final,
                     },
                 };
             }
@@ -164,11 +174,19 @@ const TestRun = struct {
     pub fn event(self: TestRun) !Event {
         return self.client.receive(self.stream_id, Event, Event.read);
     }
+
+    /// Receive an event from the run's stream.
+    /// Asserts the returned event is a test_case. Anything else would be a protocol error from the server.
+    pub fn replay(self: TestRun) !TestCase {
+        const evt = try self.event();
+        return evt.case;
+    }
 };
 
 const TestCase = struct {
     client: *Client,
     stream_id: u32,
+    is_final: bool,
 
     const Event = struct {
         event: []const u8,
@@ -200,6 +218,12 @@ const TestCase = struct {
 
         try self.client.send(generate);
         return self.client.receive(self.stream_id, @FieldType(G, "generated"), G.read);
+    }
+
+    fn assume(self: TestCase, condition: bool) !void {
+        if (!condition) {
+            return self.complete(.{ .status = .invalid });
+        }
     }
 
     fn complete(self: TestCase, result: Result) !void {
@@ -327,8 +351,6 @@ pub const Client = struct {
             .stdout = .pipe,
             .stderr = .{ .file = log },
         });
-
-        // std.debug.print("hegel server pid = {d}\n", .{server.id.?});
 
         const buf_w = try arena.alloc(u8, 4096);
         const buf_r = try arena.alloc(u8, 4096);
