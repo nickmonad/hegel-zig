@@ -22,7 +22,7 @@ pub const TestOptions = struct {
 /// arbitrary Io and Allocator instances. That will be useful
 /// if we want to create some kind of CLI to debug/inspect/play-around-with
 /// Hegel outside of a Zig test suite.
-pub fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void {
+pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !void {
     try Session.init(std.testing.io, std.testing.allocator);
     defer Session.deinit();
 
@@ -34,11 +34,15 @@ pub fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void
 
     while (true) {
         switch (try run.event()) {
-            .case => |tc| {
-                // TODO: handle error and update status
-                func(tc) catch unreachable;
+            .case => |case| {
+                var tc = case;
 
-                try tc.complete(.{ .status = .valid });
+                if (func(&tc)) {
+                    try tc.complete(.valid);
+                } else |_| {
+                    try tc.complete(.interesting);
+                }
+
                 try client.streamClose(tc.stream_id);
             },
             .done => |done| {
@@ -49,12 +53,21 @@ pub fn Test(opts: TestOptions, comptime func: fn (TestCase) anyerror!void) !void
     }
 
     // Run each final test case.
+    var @"error": ?anyerror = null;
     for (0..results.?.interesting_test_cases) |_| {
-        const tc = try run.replay();
-        func(tc) catch unreachable;
+        var tc = try run.replay();
 
-        try tc.complete(.{ .status = .valid });
+        if (func(&tc)) {
+            @panic("previously failing test is now passing");
+        } else |err| {
+            try tc.complete(.interesting);
+            @"error" = err;
+        }
+
         try client.streamClose(tc.stream_id);
+    } else {
+        // report only the final error case
+        if (@"error") |err| return err;
     }
 }
 
@@ -81,7 +94,7 @@ const Session = struct {
 
         const alloc = Session.arena.?.allocator();
 
-        var c = alloc.create(Client) catch unreachable;
+        var c = try alloc.create(Client);
         try c.init(Session.io.?, alloc, Session.log.?);
 
         Session.client = c;
@@ -185,21 +198,19 @@ pub const TestCase = struct {
     stream_id: u32,
     is_final: bool,
 
+    @"error": ?anyerror = null,
+    error_origin: ?std.builtin.SourceLocation = null,
+
     const Event = struct {
         event: []const u8,
         stream_id: u32,
         is_final: bool,
     };
 
-    const Status = enum {
+    pub const Status = enum {
         valid,
         invalid,
         interesting,
-    };
-
-    const Result = struct {
-        status: Status,
-        origin: ?std.builtin.SourceLocation = null,
     };
 
     pub fn draw(self: TestCase, comptime G: type) !@FieldType(G, "generated") {
@@ -219,23 +230,35 @@ pub const TestCase = struct {
 
     pub fn assume(self: TestCase, condition: bool) !void {
         if (!condition) {
-            return self.complete(.{ .status = .invalid });
+            return self.complete(.invalid);
         }
     }
 
-    fn complete(self: TestCase, result: Result) !void {
+    fn complete(self: TestCase, status: Status) !void {
+        var origin: [256]u8 = undefined;
         const mark_complete: Packet = try .encode(
             self.client.arena,
             .{ .stream_id = self.stream_id },
             .{
                 .command = "mark_complete",
-                .status = switch (result.status) {
+                .status = switch (status) {
                     .valid => "VALID",
                     .invalid => "INVALID",
                     .interesting => "INTERESTING",
                 },
-                .origin = null,
-                // TODO: .origin (when interesting)
+                .origin = switch (status) {
+                    .interesting => origin: {
+                        // Format origin, using error and source location.
+                        // {error}:{file}:{line} will be sent to hegel server.
+                        // error and error_origin are asserted to be present.
+                        break :origin try std.fmt.bufPrint(&origin, "{any}:{s}:{d}", .{
+                            self.@"error".?,
+                            self.error_origin.?.file,
+                            self.error_origin.?.line,
+                        });
+                    },
+                    else => null,
+                },
             },
         );
 
@@ -247,6 +270,15 @@ pub const TestCase = struct {
         // in a format documented in the protocol reference.
         // Instead of { 'result': null }, we get { 'error': 'N', 'type': 'StopTest' }.
         // Apparently, we can ignore these for now, but more investigation is needed!
+    }
+
+    pub inline fn expectEqual(self: *TestCase, expected: anytype, actual: anytype) !void {
+        std.testing.expectEqual(expected, actual) catch |err| {
+            self.@"error" = err;
+            self.error_origin = @src();
+
+            return err;
+        };
     }
 };
 
@@ -267,11 +299,11 @@ pub const TestDone = struct {
 
 test "hegel" {
     try Test(.{ .test_cases = 10 }, struct {
-        fn run(tc: TestCase) anyerror!void {
+        fn run(tc: *TestCase) anyerror!void {
             const a = try tc.draw(Int(u64, .{ .min = 10, .max = 1000 }));
             const b = try tc.draw(Int(u64, .{ .min = 10, .max = 1000 }));
 
-            try std.testing.expectEqual(a + b, b + a);
+            try tc.expectEqual(a + b, b + a);
         }
     }.run);
 }
