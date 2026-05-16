@@ -37,8 +37,7 @@ pub const Client = struct {
 
         const server: std.process.Child = try std.process.spawn(io, .{
             .argv = &.{
-                "/nix/store/n4j4s1lpa5g3xvy8107r2vb5g2yvm550-hegel-core-0.4.7/bin/hegel",
-                "--stdio",
+                "/nix/store/hmsxym7miqyyydaljdkx0v1pp1iribdy-hegel-core-0.9.1/bin/hegel",
                 "--verbosity",
                 "debug",
             },
@@ -160,12 +159,16 @@ pub const Client = struct {
         const run_test: Packet = try .encode(
             self.arena,
             .{ .stream_id = STREAM_CONTROL },
-            .{ .command = "run_test", .stream_id = stream_test, .test_cases = opts.test_cases },
+            .{
+                .command = "run_test",
+                .stream_id = stream_test,
+                .test_cases = opts.test_cases,
+                .report_multiple_failures = opts.report_multiple_failures,
+            },
         );
 
         try self.send(run_test);
         // TODO: do we actually care about waiting on the run_test_reply?
-        // If so, we need a client.wait(.{ .stream_id = 0 }) or something to that effect
 
         return .{
             .client = self,

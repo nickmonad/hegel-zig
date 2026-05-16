@@ -5,32 +5,31 @@ const cbor = @import("cbor");
 const Client = @import("client.zig").Client;
 const Packet = @import("packet.zig");
 
+const builtin = @import("builtin");
+
 const generators = @import("generators.zig");
 pub const Int = generators.Int;
 
 pub const TestOptions = struct {
     skip: bool = false,
-    name: ?[]const u8 = null,
-    test_cases: u32 = 100,
+    test_cases: u32,
 };
 
 /// Runs a Hegel test case, using std.testing.*
 /// values as the backing Io and Allocator instances.
 /// This can only be used in the context of a Zig test.
-///
-/// TODO: Create a TestCustom (better name?) that will accept
-/// arbitrary Io and Allocator instances. That will be useful
-/// if we want to create some kind of CLI to debug/inspect/play-around-with
-/// Hegel outside of a Zig test suite.
 pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !void {
+    assert(builtin.is_test);
+
     try Session.init(std.testing.io, std.testing.allocator);
     defer Session.deinit();
 
     if (opts.skip) return;
 
     var client = Session.client.?;
-    const run = try client.testRun(.{ .test_cases = opts.test_cases });
     var results: ?TestDone = null;
+
+    const run = try client.testRun(.{ .test_cases = opts.test_cases });
 
     while (true) {
         switch (try run.event()) {
@@ -52,22 +51,33 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
         }
     }
 
-    // Run each final test case.
-    var @"error": ?anyerror = null;
-    for (0..results.?.interesting_test_cases) |_| {
-        var tc = try run.replay();
+    if (results.?.interesting_test_cases > 0) {
+        // Run each final test case.
+        // First, run all but one final test case. These will still log the failure
+        // to the run log, for later inspection.
+        for (0..(results.?.interesting_test_cases - 1)) |_| {
+            var tc = try run.replay();
 
-        if (func(&tc)) {
-            @panic("previously failing test is now passing");
-        } else |err| {
-            try tc.complete(.interesting);
-            @"error" = err;
+            if (func(&tc)) {
+                @panic("previously failing test is now passing");
+            } else |_| {
+                try tc.complete(.interesting);
+            }
+
+            try client.streamClose(tc.stream_id);
         }
 
-        try client.streamClose(tc.stream_id);
-    } else {
-        // report only the final error case
-        if (@"error") |err| return err;
+        // Run the (last) final test case.
+        // This will log the failure to the run log, and importantly,
+        // fail the test using `try`, such that Zig can "unwrap" the full call stack and
+        // show a better message to the user.
+        var tc = try run.replay();
+        errdefer {
+            tc.complete(.interesting) catch unreachable;
+            client.streamClose(tc.stream_id) catch unreachable;
+        }
+
+        try func(&tc);
     }
 }
 
@@ -84,9 +94,18 @@ const Session = struct {
     var client: ?*Client = null;
     var initialized: bool = false;
     var test_count: u32 = 0;
+    var test_run: u32 = 0;
 
     fn init(io_: std.Io, gpa: std.mem.Allocator) !void {
         if (Session.initialized) return;
+
+        // Determine how many tests we'll run.
+        // Test functions as seen via `builtin` must contain "hegel:" to be part of this count.
+        for (builtin.test_functions) |test_fn| {
+            if (std.mem.containsAtLeast(u8, test_fn.name, 1, "hegel:")) {
+                test_count += 1;
+            }
+        }
 
         Session.io = io_;
         Session.arena = .init(gpa);
@@ -102,8 +121,14 @@ const Session = struct {
     }
 
     fn deinit() void {
-        Session.client.?.deinit();
-        Session.arena.?.deinit();
+        if (Session.test_count > 0) {
+            Session.test_count -= 1;
+        }
+
+        if (Session.test_count == 0) {
+            Session.client.?.deinit();
+            Session.arena.?.deinit();
+        }
     }
 };
 
@@ -115,6 +140,7 @@ pub const TestRun = struct {
 
     pub const Options = struct {
         test_cases: u32,
+        report_multiple_failures: bool = false,
     };
 
     const Reply = struct {
@@ -262,7 +288,6 @@ pub const TestCase = struct {
             },
         );
 
-        // send...
         try self.client.send(mark_complete);
 
         // TODO(nickmonad): wait for mark_complete_reply?
@@ -272,10 +297,28 @@ pub const TestCase = struct {
         // Apparently, we can ignore these for now, but more investigation is needed!
     }
 
-    pub inline fn expectEqual(self: *TestCase, expected: anytype, actual: anytype) !void {
+    pub fn expect(
+        self: *TestCase,
+        comptime src: std.builtin.SourceLocation,
+        ok: bool,
+    ) !void {
+        std.testing.expect(ok) catch |err| {
+            self.@"error" = err;
+            self.error_origin = src;
+
+            return err;
+        };
+    }
+
+    pub fn expectEqual(
+        self: *TestCase,
+        comptime src: std.builtin.SourceLocation,
+        expected: anytype,
+        actual: anytype,
+    ) !void {
         std.testing.expectEqual(expected, actual) catch |err| {
             self.@"error" = err;
-            self.error_origin = @src();
+            self.error_origin = src;
 
             return err;
         };
@@ -297,13 +340,13 @@ pub const TestDone = struct {
     };
 };
 
-test "hegel" {
-    try Test(.{ .test_cases = 10 }, struct {
+test "hegel:example" {
+    try Test(.{ .test_cases = 1 }, struct {
         fn run(tc: *TestCase) anyerror!void {
-            const a = try tc.draw(Int(u64, .{ .min = 10, .max = 1000 }));
-            const b = try tc.draw(Int(u64, .{ .min = 10, .max = 1000 }));
+            const a = try tc.draw(Int(u64, .{ .min = 10, .max = 100 }));
+            const b = try tc.draw(Int(u64, .{ .min = 1000, .max = 2000 }));
 
-            try tc.expectEqual(a + b, b + a);
+            try tc.expectEqual(@src(), a + b, b + a);
         }
     }.run);
 }

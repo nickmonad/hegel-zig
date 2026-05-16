@@ -10,6 +10,9 @@ build:
 test:
     zig build test --summary all
 
+clean:
+    rm -rf .zig-cache zig-out .hegel
+
 hegel cmd='version':
     @just hegel-{{ cmd }}
 
