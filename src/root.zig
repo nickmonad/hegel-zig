@@ -10,8 +10,9 @@ const generators = @import("generators.zig");
 pub const Int = generators.Int;
 
 pub const TestOptions = struct {
-    skip: bool = false,
     test_cases: u32,
+    skip: bool = false,
+    name: ?[]const u8 = null,
 };
 
 /// Runs a Hegel test case, using std.testing.*
@@ -26,9 +27,13 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
     if (opts.skip) return;
 
     var client = Session.client.?;
-    var results: ?TestDone = null;
+    try client.log("--- starting test run, name = {s}, cases = {d} ---\n", .{
+        if (opts.name) |name| name else "no_name",
+        opts.test_cases,
+    });
 
     const run = try client.testRun(.{ .test_cases = opts.test_cases });
+    var results: ?TestDone = null;
 
     while (true) {
         switch (try run.event()) {
@@ -50,34 +55,34 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
         }
     }
 
-    if (results.?.interesting_test_cases > 0) {
-        // Run each final test case.
-        // First, run all but one final test case. These will still log the failure
-        // to the run log, for later inspection.
-        for (0..(results.?.interesting_test_cases - 1)) |_| {
-            var tc = try run.replay();
+    try client.log("seed = \"{s}\"\n", .{results.?.seed});
+    try client.log("passed = {any}, tests = {d}, invalid = {d}, interesting = {d}\n", .{
+        results.?.passed,
+        results.?.test_cases,
+        results.?.invalid_test_cases,
+        results.?.interesting_test_cases,
+    });
 
-            if (func(&tc)) {
-                @panic("previously failing test is now passing");
-            } else |_| {
-                try tc.complete(.interesting);
-            }
-
-            try client.streamClose(tc.stream_id);
-        }
-
-        // Run the (last) final test case.
-        // This will log the failure to the run log, and importantly,
-        // fail the test using `try`, such that Zig can "unwrap" the full call stack and
-        // show a better message to the user.
+    // Run each final replay of interesting test cases.
+    for (0..(results.?.interesting_test_cases)) |_| {
         var tc = try run.replay();
-        errdefer {
-            tc.complete(.interesting) catch unreachable;
-            client.streamClose(tc.stream_id) catch unreachable;
+        try client.log("\nfailing test case!\n", .{});
+
+        if (func(&tc)) {
+            @panic("previously failing test is now passing");
+        } else |_| {
+            try tc.complete(.interesting);
+            try client.log("{s}:{s}:{d}\n", .{
+                @errorName(tc.@"error".?),
+                tc.error_origin.?.file,
+                tc.error_origin.?.line,
+            });
         }
 
-        try func(&tc);
+        try client.streamClose(tc.stream_id);
     }
+
+    try client.log("--- end test run ---\n", .{});
 }
 
 const Session = struct {
@@ -89,7 +94,6 @@ const Session = struct {
     // the "next" stream ID as we start test runs.
     var io: ?std.Io = null;
     var arena: ?std.heap.ArenaAllocator = null;
-    var log: ?std.Io.File = null;
     var client: ?*Client = null;
     var initialized: bool = false;
     var test_count: u32 = 0;
@@ -108,19 +112,13 @@ const Session = struct {
 
         Session.io = io_;
         Session.arena = .init(gpa);
-        Session.log = try std.Io.Dir.cwd().createFile(io_, "hegel.log", .{ .truncate = true });
         const alloc = Session.arena.?.allocator();
 
         // Get hegel server command from the testing env.
-        // TODO: If env var is not present, use `uv run` to start the server.
+        // TODO(nickmonad): If env var is not present, use `uv run` to start the server.
         const cmd = try env.getAlloc(alloc, "HEGEL_SERVER_COMMAND");
         var c = try alloc.create(Client);
-        try c.init(
-            alloc,
-            Session.io.?,
-            Session.log.?,
-            cmd,
-        );
+        try c.init(Session.io.?, alloc, cmd, .{ .debug = true });
 
         Session.client = c;
         Session.initialized = true;
@@ -246,7 +244,9 @@ pub const TestCase = struct {
     };
 
     pub fn draw(self: TestCase, comptime G: type) !@FieldType(G, "generated") {
+        const R: type = @FieldType(G, "generated");
         const generator: G = .{};
+
         const generate: Packet = try .encode(
             self.client.arena,
             .{ .stream_id = self.stream_id },
@@ -257,7 +257,13 @@ pub const TestCase = struct {
         );
 
         try self.client.send(generate);
-        return self.client.receive(self.stream_id, @FieldType(G, "generated"), G.read);
+        const result: R = try self.client.receive(self.stream_id, R, G.read);
+
+        if (self.is_final) {
+            try self.client.log("Draw: {any}\n", .{result});
+        }
+
+        return result;
     }
 
     pub fn assume(self: TestCase, condition: bool) !void {
@@ -347,7 +353,7 @@ pub const TestDone = struct {
 };
 
 test "hegel:example" {
-    try Test(.{ .test_cases = 1 }, struct {
+    try Test(.{ .name = "example", .test_cases = 5 }, struct {
         fn run(tc: *TestCase) anyerror!void {
             const a = try tc.draw(Int(u64, .{ .min = 10, .max = 100 }));
             const b = try tc.draw(Int(u64, .{ .min = 1000, .max = 2000 }));

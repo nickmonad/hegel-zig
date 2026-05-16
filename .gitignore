@@ -2,4 +2,4 @@
 zig-out
 zig-pkg
 .hegel
-hegel.log
+hegel*.log

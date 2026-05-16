@@ -15,7 +15,14 @@ pub const Client = struct {
     next_stream_id: u32 = 1,
     streams: std.AutoHashMap(u32, Stream),
 
+    log_test: std.Io.File,
+    log_debug: ?std.Io.File = null,
+
     const Self = @This();
+
+    const Options = struct {
+        debug: bool = false,
+    };
 
     const Stream = struct {
         id: u32,
@@ -33,11 +40,17 @@ pub const Client = struct {
     /// so the client is not responsible for freeing any memory allocated in it.
     pub fn init(
         self: *Self,
-        arena: std.mem.Allocator,
         io: std.Io,
-        log: std.Io.File,
+        arena: std.mem.Allocator,
         cmd: []const u8,
+        opts: Options,
     ) !void {
+        var log_debug: ?std.Io.File = null;
+        if (opts.debug) {
+            // create log files for server and test run
+            log_debug = try std.Io.Dir.cwd().createFile(io, "hegel.debug.log", .{ .truncate = true });
+        }
+
         var env: std.process.Environ.Map = .init(arena);
         try env.put("PYTHONUNBUFFERED", "1");
 
@@ -46,18 +59,24 @@ pub const Client = struct {
             .environ_map = &env,
             .stdin = .pipe,
             .stdout = .pipe,
-            .stderr = .{ .file = log },
+            .stderr = if (log_debug) |file| .{ .file = file } else .ignore,
         });
 
-        const buf_w = try arena.alloc(u8, 4096);
-        const buf_r = try arena.alloc(u8, 4096);
+        const log_test = try std.Io.Dir.cwd().createFile(io, "hegel.test.log", .{
+            .truncate = true,
+        });
 
         self.* = .{
             .io = io,
             .arena = arena,
             .server = server,
             .streams = .init(arena),
+            .log_test = log_test,
+            .log_debug = log_debug,
         };
+
+        const buf_w = try arena.alloc(u8, 4096);
+        const buf_r = try arena.alloc(u8, 4096);
 
         const w: std.Io.File.Writer = self.server.stdin.?.writer(io, buf_w);
         const r: std.Io.File.Reader = self.server.stdout.?.reader(io, buf_r);
@@ -67,6 +86,18 @@ pub const Client = struct {
 
     pub fn deinit(self: *Self) void {
         self.server.kill(self.io);
+        self.log_test.close(self.io);
+
+        if (self.log_debug) |file| {
+            file.close(self.io);
+        }
+    }
+
+    /// Format and write up to 1KB to the test log.
+    pub fn log(self: *Self, comptime fmt: []const u8, args: anytype) !void {
+        var buf: [1024]u8 = undefined;
+        const out = try std.fmt.bufPrint(&buf, fmt, args);
+        try self.log_test.writeStreamingAll(self.io, out);
     }
 
     pub fn send(self: *Self, p: Packet) !void {
