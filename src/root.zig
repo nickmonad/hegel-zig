@@ -11,6 +11,7 @@ pub const Int = generators.Int;
 
 pub const TestOptions = struct {
     test_cases: u32,
+    seed: ?[]const u8 = null,
     skip: bool = false,
     name: ?[]const u8 = null,
 };
@@ -32,8 +33,11 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
         opts.test_cases,
     });
 
-    const run = try client.testRun(.{ .test_cases = opts.test_cases });
     var results: ?TestDone = null;
+    const run = try client.testRun(.{
+        .test_cases = opts.test_cases,
+        .seed = opts.seed,
+    });
 
     while (true) {
         switch (try run.event()) {
@@ -144,6 +148,7 @@ pub const TestRun = struct {
 
     pub const Options = struct {
         test_cases: u32,
+        seed: ?[]const u8 = null,
         report_multiple_failures: bool = false,
     };
 

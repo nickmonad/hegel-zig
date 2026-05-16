@@ -195,6 +195,7 @@ pub const Client = struct {
                 .command = "run_test",
                 .stream_id = stream_test,
                 .test_cases = opts.test_cases,
+                .seed = opts.seed,
                 .report_multiple_failures = opts.report_multiple_failures,
             },
         );
