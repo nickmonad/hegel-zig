@@ -31,16 +31,18 @@ pub const Client = struct {
     /// Initialize Hegel client. The client spawns the server and opens a connection
     /// over stdin/stdout. The provided arena allocator is for the entire test session,
     /// so the client is not responsible for freeing any memory allocated in it.
-    pub fn init(self: *Self, io: std.Io, arena: std.mem.Allocator, log: std.Io.File) !void {
+    pub fn init(
+        self: *Self,
+        arena: std.mem.Allocator,
+        io: std.Io,
+        log: std.Io.File,
+        cmd: []const u8,
+    ) !void {
         var env: std.process.Environ.Map = .init(arena);
         try env.put("PYTHONUNBUFFERED", "1");
 
         const server: std.process.Child = try std.process.spawn(io, .{
-            .argv = &.{
-                "/nix/store/hmsxym7miqyyydaljdkx0v1pp1iribdy-hegel-core-0.9.1/bin/hegel",
-                "--verbosity",
-                "debug",
-            },
+            .argv = &.{ cmd, "--verbosity", "debug" },
             .environ_map = &env,
             .stdin = .pipe,
             .stdout = .pipe,
@@ -116,7 +118,6 @@ pub const Client = struct {
                 if (try read(item.packet, self.arena, self)) |value| {
                     // Packet matches expected type T.
                     // Remove from queue and return.
-                    //
                     // NOTE(nickmonad): We currently don't destroy the removed QueueItem, since we're allocated
                     // into an arena. This might have to change on very long test runs.
                     stream.queue.remove(node);
@@ -197,7 +198,7 @@ const Connection = struct {
     const Self = @This();
 
     fn init(writer: std.Io.File.Writer, reader: std.Io.File.Reader, arena: std.mem.Allocator) !Self {
-        // initialize with a (synchonrous) handshake to the server
+        // initialize with a (synchronous) handshake to the server
         const handshake: Packet = .{
             .stream_id = STREAM_CONTROL,
             .message_id = 0,

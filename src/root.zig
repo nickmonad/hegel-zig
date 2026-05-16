@@ -1,4 +1,3 @@
-//! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
 const assert = std.debug.assert;
 const cbor = @import("cbor");
@@ -21,7 +20,7 @@ pub const TestOptions = struct {
 pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !void {
     assert(builtin.is_test);
 
-    try Session.init(std.testing.io, std.testing.allocator);
+    try Session.init(std.testing.io, std.testing.allocator, std.testing.environ);
     defer Session.deinit();
 
     if (opts.skip) return;
@@ -96,7 +95,7 @@ const Session = struct {
     var test_count: u32 = 0;
     var test_run: u32 = 0;
 
-    fn init(io_: std.Io, gpa: std.mem.Allocator) !void {
+    fn init(io_: std.Io, gpa: std.mem.Allocator, env: std.process.Environ) !void {
         if (Session.initialized) return;
 
         // Determine how many tests we'll run.
@@ -110,11 +109,18 @@ const Session = struct {
         Session.io = io_;
         Session.arena = .init(gpa);
         Session.log = try std.Io.Dir.cwd().createFile(io_, "hegel.log", .{ .truncate = true });
-
         const alloc = Session.arena.?.allocator();
 
+        // Get hegel server command from the testing env.
+        // TODO: If env var is not present, use `uv run` to start the server.
+        const cmd = try env.getAlloc(alloc, "HEGEL_SERVER_COMMAND");
         var c = try alloc.create(Client);
-        try c.init(Session.io.?, alloc, Session.log.?);
+        try c.init(
+            alloc,
+            Session.io.?,
+            Session.log.?,
+            cmd,
+        );
 
         Session.client = c;
         Session.initialized = true;
@@ -277,8 +283,8 @@ pub const TestCase = struct {
                         // Format origin, using error and source location.
                         // {error}:{file}:{line} will be sent to hegel server.
                         // error and error_origin are asserted to be present.
-                        break :origin try std.fmt.bufPrint(&origin, "{any}:{s}:{d}", .{
-                            self.@"error".?,
+                        break :origin try std.fmt.bufPrint(&origin, "{s}:{s}:{d}", .{
+                            @errorName(self.@"error".?),
                             self.error_origin.?.file,
                             self.error_origin.?.line,
                         });
