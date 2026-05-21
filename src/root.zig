@@ -116,13 +116,12 @@ const Session = struct {
 
         Session.io = io_;
         Session.arena = .init(gpa);
+        errdefer Session.arena.?.deinit();
+
         const alloc = Session.arena.?.allocator();
 
-        // Get hegel server command from the testing env.
-        // TODO(nickmonad): If env var is not present, use `uv run` to start the server.
-        const cmd = try env.getAlloc(alloc, "HEGEL_SERVER_COMMAND");
         var c = try alloc.create(Client);
-        try c.init(Session.io.?, alloc, cmd, .{ .debug = true });
+        try c.init(Session.io.?, alloc, env, .{ .debug = true });
 
         Session.client = c;
         Session.initialized = true;

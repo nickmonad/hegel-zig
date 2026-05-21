@@ -1,7 +1,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const Packet = @import("packet.zig");
+
 const hegel = @import("root.zig");
+const hegelCommand = @import("command.zig").hegelCommand;
+const Packet = @import("packet.zig");
 const TestRun = hegel.TestRun;
 
 const STREAM_CONTROL: u32 = 0;
@@ -42,7 +44,7 @@ pub const Client = struct {
         self: *Self,
         io: std.Io,
         arena: std.mem.Allocator,
-        cmd: []const u8,
+        env: std.process.Environ,
         opts: Options,
     ) !void {
         var log_debug: ?std.Io.File = null;
@@ -51,12 +53,12 @@ pub const Client = struct {
             log_debug = try std.Io.Dir.cwd().createFile(io, "hegel.debug.log", .{ .truncate = true });
         }
 
-        var env: std.process.Environ.Map = .init(arena);
-        try env.put("PYTHONUNBUFFERED", "1");
+        var env_map: std.process.Environ.Map = .init(arena);
+        try env_map.put("PYTHONUNBUFFERED", "1");
 
         const server: std.process.Child = try std.process.spawn(io, .{
-            .argv = &.{ cmd, "--verbosity", "debug" },
-            .environ_map = &env,
+            .argv = hegelCommand(arena, env, .{ .debug = opts.debug }),
+            .environ_map = &env_map,
             .stdin = .pipe,
             .stdout = .pipe,
             .stderr = if (log_debug) |file| .{ .file = file } else .ignore,
