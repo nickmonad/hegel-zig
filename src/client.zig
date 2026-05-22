@@ -87,6 +87,8 @@ pub const Client = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self.streams.deinit();
+
         self.server.kill(self.io);
         self.log_test.close(self.io);
 
@@ -167,8 +169,12 @@ pub const Client = struct {
                 self.arena,
             );
 
-            if (try read(packet, self.arena, self)) |value| {
-                return value;
+            // Only check for matching packets on the given stream ID.
+            // Packets arriving on a different stream should be saved for later processing.
+            if (packet.stream_id == on_stream_id) {
+                if (try read(packet, self.arena, self)) |value| {
+                    return value;
+                }
             }
 
             // Queue the non-matching packet and wait for another.
