@@ -131,7 +131,7 @@ pub fn read(r: *Io.Reader, gpa: std.mem.Allocator) !Packet {
     };
 }
 
-fn debug(self: Packet, name: []const u8, gpa: std.mem.Allocator) void {
+pub fn debug(self: Packet, name: []const u8, gpa: std.mem.Allocator) void {
     const is_cbor = cbor.match(self.payload, cbor.any) catch false;
 
     std.debug.print("Packet ({s}) {{\n", .{name});
@@ -185,4 +185,52 @@ test "packet round trip" {
 
         try std.testing.expectEqualDeep(p, decoded);
     }
+}
+
+// Sanity checking some results from cbor libray v1.2.0
+// See https://github.com/neurocyte/cbor/issues/5
+// If these start failing after a cbor upgrade, we need to re-evaluate
+// our core extraction logic in Client.receive()
+
+const NumberResult = struct {
+    result: u64,
+};
+
+test "cbor extract number from boolean, match returns false, no error" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const json =
+        \\{"result": true}
+    ;
+
+    const cbor_data = try cbor.fromJsonAlloc(alloc, json);
+
+    var result: NumberResult = undefined;
+    const ok = try cbor.match(cbor_data, cbor.extractAlloc(&result, alloc));
+
+    try std.testing.expect(!ok);
+}
+
+const ListResult = struct {
+    result: []const u64,
+};
+
+test "cbor extract list from boolean, match has error" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const json =
+        \\{"result": true}
+    ;
+
+    const cbor_data = try cbor.fromJsonAlloc(alloc, json);
+
+    var result: ListResult = undefined;
+    try std.testing.expectError(
+        error.InvalidArrayType,
+        cbor.match(cbor_data, cbor.extractAlloc(&result, alloc)),
+    );
 }
