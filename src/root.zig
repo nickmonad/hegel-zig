@@ -1,13 +1,13 @@
+const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 const cbor = @import("cbor");
 const Client = @import("client.zig").Client;
 const Packet = @import("packet.zig");
 
-const builtin = @import("builtin");
-
 const generators = @import("generators.zig");
 pub const Int = generators.Int;
+pub const List = generators.List;
 
 pub const TestOptions = struct {
     test_cases: u32,
@@ -20,9 +20,7 @@ pub const TestOptions = struct {
 /// values as the backing Io and Allocator instances.
 /// This can only be used in the context of a Zig test.
 pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !void {
-    assert(builtin.is_test);
-
-    try Session.init(std.testing.io, std.testing.allocator, std.testing.environ);
+    try Session.init();
     defer Session.deinit();
 
     if (opts.skip) return;
@@ -96,32 +94,33 @@ const Session = struct {
     // so we'll need a thread-safe version.
     // This includes the Client, as well! We'll need a thread-safe way to increment
     // the "next" stream ID as we start test runs.
-    var io: ?std.Io = null;
+    var io: ?std.Io.Threaded = null;
+    var gpa: ?std.heap.DebugAllocator(.{}) = null;
     var arena: ?std.heap.ArenaAllocator = null;
     var client: ?*Client = null;
     var initialized: bool = false;
     var test_count: u32 = 0;
-    var test_run: u32 = 0;
 
-    fn init(io_: std.Io, gpa: std.mem.Allocator, env: std.process.Environ) !void {
+    fn init() !void {
         if (Session.initialized) return;
 
         // Determine how many tests we'll run.
         // Test functions as seen via `builtin` must contain "hegel:" to be part of this count.
         for (builtin.test_functions) |test_fn| {
             if (std.mem.containsAtLeast(u8, test_fn.name, 1, "hegel:")) {
-                test_count += 1;
+                Session.test_count += 1;
             }
         }
 
-        Session.io = io_;
-        Session.arena = .init(gpa);
+        Session.gpa = .init;
+        Session.arena = .init(Session.gpa.?.allocator());
         errdefer Session.arena.?.deinit();
-
         const alloc = Session.arena.?.allocator();
 
+        Session.io = std.Io.Threaded.init(alloc, .{});
+
         var c = try alloc.create(Client);
-        try c.init(Session.io.?, alloc, env, .{ .debug = true });
+        try c.init(Session.io.?.io(), alloc, std.testing.environ, .{ .debug = true });
 
         Session.client = c;
         Session.initialized = true;
@@ -135,6 +134,9 @@ const Session = struct {
         if (Session.test_count == 0) {
             Session.client.?.deinit();
             Session.arena.?.deinit();
+
+            _ = Session.gpa.?.detectLeaks();
+            assert(Session.gpa.?.deinit() == .ok);
         }
     }
 };
@@ -356,13 +358,23 @@ pub const TestDone = struct {
     };
 };
 
-test "hegel:example" {
-    try Test(.{ .name = "example", .test_cases = 5 }, struct {
+test "hegel:example:int" {
+    try Test(.{ .name = "example int", .test_cases = 5 }, struct {
         fn run(tc: *TestCase) anyerror!void {
             const a = try tc.draw(Int(u64, .{ .min = 10, .max = 100 }));
             const b = try tc.draw(Int(u64, .{ .min = 1000, .max = 2000 }));
 
             try tc.expectEqual(@src(), a + b, b + a);
+        }
+    }.run);
+}
+
+test "hegel:example:list" {
+    try Test(.{ .name = "example list", .test_cases = 1 }, struct {
+        fn run(tc: *TestCase) anyerror!void {
+            const a: []const u64 = try tc.draw(List(Int(u64, .{ .min = 10, .max = 100 }), .{ .min_size = 1, .max_size = 10 }));
+            try tc.expect(@src(), a.len >= 1 and a.len <= 10);
+            try tc.expect(@src(), a[0] == 10);
         }
     }.run);
 }
