@@ -73,10 +73,10 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
             @panic("previously failing test is now passing");
         } else |_| {
             try tc.complete(.interesting);
-            try client.log("{s}:{s}:{d}\n", .{
-                @errorName(tc.@"error".?),
+            try client.log("{s}:{d}:{s}\n", .{
                 tc.error_origin.?.file,
                 tc.error_origin.?.line,
+                @errorName(tc.@"error".?),
             });
         }
 
@@ -297,12 +297,12 @@ pub const TestCase = struct {
                 .origin = switch (status) {
                     .interesting => origin: {
                         // Format origin, using error and source location.
-                        // {error}:{file}:{line} will be sent to hegel server.
+                        // {file}:{line}:{error} will be sent to hegel server.
                         // error and error_origin are asserted to be present.
-                        break :origin try std.fmt.bufPrint(&origin, "{s}:{s}:{d}", .{
-                            @errorName(self.@"error".?),
+                        break :origin try std.fmt.bufPrint(&origin, "{s}:{d}:{s}", .{
                             self.error_origin.?.file,
                             self.error_origin.?.line,
+                            @errorName(self.@"error".?),
                         });
                     },
                     else => null,
@@ -415,9 +415,9 @@ test "hegel:sort" {
     try Test(.{ .name = "sort", .test_cases = 100 }, struct {
         fn run(tc: *TestCase) anyerror!void {
             const l1: []const u64 = try tc.draw(List(Int(u64, .{}), .{ .max_size = 1000 }));
-            std.mem.sort(u64, @constCast(l1), {}, comptime std.sort.asc(u64));
-
             const l2: []const u64 = mySort(tc.arena, l1);
+
+            std.mem.sort(u64, @constCast(l1), {}, comptime std.sort.asc(u64));
             try tc.expectEqualSlices(@src(), u64, l1, l2);
         }
     }.run);
