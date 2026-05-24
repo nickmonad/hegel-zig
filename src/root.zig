@@ -65,25 +65,29 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
     });
 
     // Run each final replay of interesting test cases.
+    var last_error: ?anyerror = null;
     for (0..(results.?.interesting_test_cases)) |_| {
         var tc = try run.replay();
         try client.log("\nfailing test case!\n", .{});
 
         if (func(&tc)) {
             @panic("previously failing test is now passing");
-        } else |_| {
+        } else |err| {
             try tc.complete(.interesting);
             try client.log("{s}:{d}:{s}\n", .{
                 tc.error_origin.?.file,
                 tc.error_origin.?.line,
                 @errorName(tc.@"error".?),
             });
+
+            last_error = err;
         }
 
         try client.streamClose(tc.stream_id);
     }
 
     try client.log("--- end test run ---\n", .{});
+    if (last_error) |err| return err;
 }
 
 const Session = struct {
