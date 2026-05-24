@@ -6,8 +6,8 @@ const Client = @import("client.zig").Client;
 
 pub fn IntOptions(comptime T: type) type {
     return struct {
-        min: ?T = null,
-        max: ?T = null,
+        min: T = std.math.minInt(T),
+        max: T = std.math.maxInt(T),
     };
 }
 
@@ -24,8 +24,8 @@ pub fn Int(comptime T: type, opts: IntOptions(T)) type {
 
         pub const Schema = struct {
             type: []const u8 = "integer",
-            min_value: ?T,
-            max_value: ?T,
+            min_value: T,
+            max_value: T,
         };
 
         pub fn schema(self: Self) Schema {
@@ -41,6 +41,7 @@ pub fn Int(comptime T: type, opts: IntOptions(T)) type {
                 return result.result;
             }
 
+            try checkError(packet);
             return null;
         }
     };
@@ -88,7 +89,17 @@ pub fn List(comptime G: type, opts: ListOptions) type {
                 return result.result;
             }
 
+            try checkError(packet);
             return null;
         }
     };
+}
+
+fn checkError(packet: Packet) !void {
+    var err: struct { @"error": []const u8, type: []const u8 } = undefined;
+    if (try cbor.match(packet.payload, cbor.extract(&err))) {
+        if (std.mem.eql(u8, err.type, "StopTest")) {
+            return error.StopTest;
+        }
+    }
 }

@@ -26,16 +26,13 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
     if (opts.skip) return;
 
     var client = Session.client.?;
-    try client.log("--- starting test run, name = {s}, cases = {d} ---\n", .{
+    try client.log("--- starting test run ({s}) with {d} cases ---\n", .{
         if (opts.name) |name| name else "no_name",
         opts.test_cases,
     });
 
     var results: ?TestDone = null;
-    const run = try client.testRun(.{
-        .test_cases = opts.test_cases,
-        .seed = opts.seed,
-    });
+    const run = try client.testRun(.{ .test_cases = opts.test_cases, .seed = opts.seed });
 
     while (true) {
         switch (try run.event()) {
@@ -44,8 +41,10 @@ pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !voi
 
                 if (func(&tc)) {
                     try tc.complete(.valid);
-                } else |_| {
-                    try tc.complete(.interesting);
+                } else |err| {
+                    if (err != error.StopTest) {
+                        try tc.complete(.interesting);
+                    }
                 }
 
                 try client.streamClose(tc.stream_id);
@@ -184,11 +183,13 @@ pub const TestRun = struct {
                 );
 
                 try client.send(test_case_reply);
+
                 return .{
                     .case = .{
                         .client = client,
                         .stream_id = test_case.stream_id,
                         .is_final = test_case.is_final,
+                        .arena = arena,
                     },
                 };
             }
@@ -208,6 +209,7 @@ pub const TestRun = struct {
                 );
 
                 try client.send(test_done_reply);
+
                 return .{
                     .done = test_done.results,
                 };
@@ -236,6 +238,8 @@ pub const TestCase = struct {
 
     @"error": ?anyerror = null,
     error_origin: ?std.builtin.SourceLocation = null,
+
+    arena: std.mem.Allocator,
 
     const Event = struct {
         event: []const u8,
@@ -341,6 +345,21 @@ pub const TestCase = struct {
             return err;
         };
     }
+
+    pub fn expectEqualSlices(
+        self: *TestCase,
+        comptime src: std.builtin.SourceLocation,
+        comptime T: type,
+        expected: []const T,
+        actual: []const T,
+    ) !void {
+        std.testing.expectEqualSlices(T, expected, actual) catch |err| {
+            self.@"error" = err;
+            self.error_origin = src;
+
+            return err;
+        };
+    }
 };
 
 pub const TestDone = struct {
@@ -358,8 +377,8 @@ pub const TestDone = struct {
     };
 };
 
-test "hegel:example:int" {
-    try Test(.{ .name = "example int", .test_cases = 5 }, struct {
+test "hegel:addition" {
+    try Test(.{ .name = "addition", .test_cases = 5 }, struct {
         fn run(tc: *TestCase) anyerror!void {
             const a = try tc.draw(Int(u64, .{ .min = 10, .max = 100 }));
             const b = try tc.draw(Int(u64, .{ .min = 1000, .max = 2000 }));
@@ -369,12 +388,37 @@ test "hegel:example:int" {
     }.run);
 }
 
-test "hegel:example:list" {
-    try Test(.{ .name = "example list", .test_cases = 1 }, struct {
+fn mySort(arena: std.mem.Allocator, list: []const u64) []const u64 {
+    if (list.len <= 1) {
+        return list;
+    }
+
+    // Copy...
+    var copied: []u64 = arena.dupe(u64, list) catch unreachable;
+
+    // Sort...
+    std.mem.sort(u64, copied, {}, comptime std.sort.asc(u64));
+
+    // Deduplicate in-place...
+    var insert: usize = 0;
+    for (1..copied.len) |i| {
+        if (copied[i] != copied[insert]) {
+            insert += 1;
+            copied[insert] = copied[i];
+        }
+    }
+
+    return copied[0..(insert + 1)];
+}
+
+test "hegel:sort" {
+    try Test(.{ .name = "sort", .test_cases = 100 }, struct {
         fn run(tc: *TestCase) anyerror!void {
-            const a: []const u64 = try tc.draw(List(Int(u64, .{ .min = 10, .max = 100 }), .{ .min_size = 1, .max_size = 10 }));
-            try tc.expect(@src(), a.len >= 1 and a.len <= 10);
-            try tc.expect(@src(), a[0] == 10);
+            const l1: []const u64 = try tc.draw(List(Int(u64, .{}), .{ .max_size = 1000 }));
+            std.mem.sort(u64, @constCast(l1), {}, comptime std.sort.asc(u64));
+
+            const l2: []const u64 = mySort(tc.arena, l1);
+            try tc.expectEqualSlices(@src(), u64, l1, l2);
         }
     }.run);
 }
