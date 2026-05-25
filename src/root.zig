@@ -16,9 +16,9 @@ pub const TestOptions = struct {
     skip: bool = false,
 };
 
-/// Runs a Hegel test case, using std.testing.*
-/// values as the backing Io and Allocator instances.
-/// This can only be used in the context of a Zig test.
+/// Runs a Hegel test case, using a shared session.
+/// A `std.heap.DebugAllocator` is created, as well as a `std.Io.Threaded` IO instance.
+/// Can only be used in the context of a Zig test.
 pub fn Test(opts: TestOptions, comptime func: fn (*TestCase) anyerror!void) !void {
     try Session.init();
     defer Session.deinit();
