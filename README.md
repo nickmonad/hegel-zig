@@ -15,7 +15,7 @@
 
 ## Installation
 
-Add to your `build.zig.zon`,
+Add to your `build.zig.zon`:
 
 ```zig
 .dependencies = .{
@@ -26,18 +26,44 @@ Add to your `build.zig.zon`,
 },
 ```
 
-Then in `build.zig`,
+Alternatively, you can run:
+
+```sh
+zig fetch --save git+https://github.com/nickmonad/hegel-zig.git
+```
+
+> `zig fetch` will resolve the latest commit (and calculate the hash) of this repository, which is likely what you want until we start versioning.
+
+Then in `build.zig`:
 
 ```zig
 const hegel = b.dependency("hegel", .{});
+
 my_module.addImport("hegel", hegel.module("hegel"));
+
+// alternatively, within a `createModule()` call...
+// ...
+  .imports = &.{
+      .{ .name = "hegel", .module = hegel.module("hegel") },
+  },
+// ...
 ```
 
 At runtime, `hegel-zig` requires a running [hegel-core](https://github.com/hegeldev/hegel-core) server component.
 
-Currently, `hegel-zig` will first check if `HEGEL_SERVER_COMMAND` is set in the running environment. If so, it will use that to invoke the server. If it is not set, it will invoke `uv tool run` to download and run the server. **Today, `hegel-zig` expects that at the very least, [`uv`](https://docs.astral.sh/uv/) is installed on the host system.** Other Hegel client libraries will attempt to download `uv` and install it, but we have not implemented that here yet.
+Currently, `hegel-zig` will first check if `HEGEL_SERVER_COMMAND` is set in the running environment.
+If so, it will use that to invoke the server. If it is not set, it will invoke `uv tool run` to download and run the server.
+**Today, `hegel-zig` expects that at the very least, [`uv`](https://docs.astral.sh/uv/) is installed on the host system.**
+Other Hegel client libraries will attempt to download `uv` and install it, but we have not implemented that here yet.
 
 For more information on the `uv` dependency, please see the [Installation reference](https://hegel.dev/reference/installation) on the Hegel website.
+
+`hegel-zig` writes out some `*.log` files at runtime. It's recommended to add the following to your project's `.gitignore`.
+
+```
+.hegel/
+hegel*.log
+```
 
 ## Quickstart
 

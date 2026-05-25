@@ -11,9 +11,9 @@ pub const List = generators.List;
 
 pub const TestOptions = struct {
     test_cases: u32,
+    name: ?[]const u8 = null,
     seed: ?[]const u8 = null,
     skip: bool = false,
-    name: ?[]const u8 = null,
 };
 
 /// Runs a Hegel test case, using std.testing.*
@@ -122,6 +122,8 @@ const Session = struct {
 
         Session.io = std.Io.Threaded.init(alloc, .{});
 
+        // NOTE(nickmonad): Currently, we force debug logging to `hegel.debug.log` from
+        // the server. Need to control with a `HEGEL_DEBUG` env var.
         var c = try alloc.create(Client);
         try c.init(Session.io.?.io(), alloc, std.testing.environ, .{ .debug = true });
 
