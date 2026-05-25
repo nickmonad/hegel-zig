@@ -115,17 +115,23 @@ test "hegel:sort" {
 }
 ```
 
-This test will fail when run with `zig test`! The minimally failing test case will be written to
-`hegel.test.log` in the working directory. This report shows us that a slice of `{ 0, 0 }` is a minimal value we can use to reproduce the failure.
+This test will fail when run with `zig test`!
+
+The minimally failing test case will be written to `hegel.test.log` in the working directory.
+This report shows us that a slice of `{ 0, 0 }` is a minimal value we can use to reproduce the failure.
+
+```
+cat hegel.test.log
+```
 
 ```
 --- starting test run (sort) with 100 cases ---
-seed = "75057069797404574521494413036682449172"
-passed = false, tests = 24, invalid = 0, interesting = 1
+seed = "258037487401619116070047623238935554120"
+passed = false, tests = 25, invalid = 0, interesting = 1
 
 failing test case!
 Draw: { 0, 0 }
-root.zig:421:TestExpectedEqual
+main.zig:43:TestExpectedEqual
 --- end test run ---
 ```
 
