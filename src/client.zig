@@ -2,7 +2,6 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 const hegel = @import("root.zig");
-const hegelCommand = @import("command.zig").hegelCommand;
 const Packet = @import("packet.zig");
 const TestRun = hegel.TestRun;
 
@@ -53,17 +52,7 @@ pub const Client = struct {
             log_debug = try std.Io.Dir.cwd().createFile(io, "hegel.debug.log", .{ .truncate = true });
         }
 
-        var env_map: std.process.Environ.Map = .init(arena);
-        try env_map.put("PYTHONUNBUFFERED", "1");
-
-        const server: std.process.Child = try std.process.spawn(io, .{
-            .argv = hegelCommand(arena, env, .{ .debug = opts.debug }),
-            .environ_map = &env_map,
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .stderr = if (log_debug) |file| .{ .file = file } else .ignore,
-        });
-
+        const server = try runServer(io, arena, env, .{ .log = log_debug });
         const log_test = try std.Io.Dir.cwd().createFile(io, "hegel.test.log", .{
             .truncate = true,
         });
@@ -259,3 +248,46 @@ const Connection = struct {
         return .{ .writer = w, .reader = r, .initialized = true };
     }
 };
+
+const ServerOptions = struct {
+    log: ?std.Io.File = null,
+};
+
+fn runServer(
+    io: std.Io,
+    arena: std.mem.Allocator,
+    env: std.process.Environ,
+    opts: ServerOptions,
+) !std.process.Child {
+    const cmd: []const []const u8 = cmd: {
+        if (env.getAlloc(arena, "HEGEL_SERVER_COMMAND")) |cmd| {
+            break :cmd &.{
+                cmd,
+                "--verbosity",
+                if (opts.log) |_| "debug" else "normal",
+            };
+        } else |_| {
+            break :cmd &.{
+                "uv",
+                "tool",
+                "run",
+                "--from",
+                "hegel-core==0.9.1",
+                "hegel",
+                "--verbosity",
+                if (opts.log) |_| "debug" else "normal",
+            };
+        }
+    };
+
+    var env_map: std.process.Environ.Map = .init(arena);
+    try env_map.put("PYTHONUNBUFFERED", "1");
+
+    return std.process.spawn(io, .{
+        .argv = cmd,
+        .environ_map = &env_map,
+        .stdin = .pipe,
+        .stdout = .pipe,
+        .stderr = if (opts.log) |file| .{ .file = file } else .ignore,
+    });
+}
