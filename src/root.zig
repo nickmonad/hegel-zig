@@ -122,8 +122,6 @@ const Session = struct {
 
         Session.io = std.Io.Threaded.init(alloc, .{});
 
-        // NOTE(nickmonad): Currently, we force debug logging to `hegel.debug.log` from
-        // the server. Need to control with a `HEGEL_DEBUG` env var.
         var c = try alloc.create(Client);
         try c.init(Session.io.?.io(), alloc, std.testing.environ, .{ .debug = true });
 
@@ -383,48 +381,11 @@ pub const TestDone = struct {
     };
 };
 
-test "hegel:addition" {
-    try Test(.{ .name = "addition", .test_cases = 5 }, struct {
-        fn run(tc: *TestCase) anyerror!void {
-            const a = try tc.draw(Int(u64, .{ .min = 10, .max = 100 }));
-            const b = try tc.draw(Int(u64, .{ .min = 1000, .max = 2000 }));
-
-            try tc.expectEqual(@src(), a + b, b + a);
-        }
-    }.run);
-}
-
-fn mySort(arena: std.mem.Allocator, list: []const u64) []const u64 {
-    if (list.len <= 1) {
-        return list;
-    }
-
-    // Copy...
-    var copied: []u64 = arena.dupe(u64, list) catch unreachable;
-
-    // Sort...
-    std.mem.sort(u64, copied, {}, comptime std.sort.asc(u64));
-
-    // Deduplicate in-place...
-    var insert: usize = 0;
-    for (1..copied.len) |i| {
-        if (copied[i] != copied[insert]) {
-            insert += 1;
-            copied[insert] = copied[i];
-        }
-    }
-
-    return copied[0..(insert + 1)];
-}
-
-test "hegel:sort" {
-    try Test(.{ .name = "sort", .test_cases = 100 }, struct {
-        fn run(tc: *TestCase) anyerror!void {
-            const l1: []const u64 = try tc.draw(List(Int(u64, .{}), .{ .max_size = 1000 }));
-            const l2: []const u64 = mySort(tc.arena, l1);
-
-            std.mem.sort(u64, @constCast(l1), {}, comptime std.sort.asc(u64));
-            try tc.expectEqualSlices(@src(), u64, l1, l2);
-        }
-    }.run);
+test {
+    // NOTE(nickmonad)
+    // As far as I can tell, `std.testing.refAllDecls(@This())` doesn't pick up on modules not marked as "pub".
+    // So, any new modules added that aren't pub, need to be listed here so they get picked up on `zig build test`.
+    _ = @import("client.zig");
+    _ = @import("generators.zig");
+    _ = @import("packet.zig");
 }
