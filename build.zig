@@ -8,7 +8,7 @@ pub fn build(b: *std.Build) !void {
     const cbor = b.dependency("cbor", .{});
 
     const hegel = b.addModule("hegel", .{
-        .root_source_file = b.path("src/root.zig"),
+        .root_source_file = b.path("src/hegel.zig"),
         .optimize = optimize,
         .target = target, // Root module of a test executable requires us to specify a target.
         .imports = &.{

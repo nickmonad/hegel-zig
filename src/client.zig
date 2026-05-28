@@ -1,7 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 
-const hegel = @import("root.zig");
+const hegel = @import("hegel.zig");
 const Packet = @import("packet.zig");
 const TestRun = hegel.TestRun;
 
