@@ -30,22 +30,23 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_hegel_tests.step);
 
-    // "example-{}"
     // run example hegel tests under examples/
     // create a module and test for each example specified here.
-    // Can be invoked via `zig build example-{name}`
-    const examples: []const []const u8 = &.{
-        "add",
-        "sort",
+    // Can be invoked via `zig build {example name}`
+    const Example = struct {
+        name: []const u8,
+        path: []const u8,
     };
 
-    for (examples) |name| {
-        const example_name = try std.fmt.allocPrint(b.allocator, "example-{s}", .{name});
+    const examples = [_]Example{
+        .{ .name = "add", .path = "examples/add.zig" },
+        .{ .name = "sort", .path = "examples/sort.zig" },
+    };
+
+    for (examples) |example| {
         const example_test = b.addTest(.{
-            .root_module = b.addModule(example_name, .{
-                .root_source_file = b.path(
-                    try std.fmt.allocPrint(b.allocator, "examples/{s}.zig", .{name}),
-                ),
+            .root_module = b.addModule(example.name, .{
+                .root_source_file = b.path(example.path),
                 .target = target,
                 .imports = &.{
                     .{ .name = "hegel", .module = hegel },
@@ -54,7 +55,7 @@ pub fn build(b: *std.Build) !void {
         });
 
         const run_example_test = b.addRunArtifact(example_test);
-        const example_step = b.step(example_name, "Run example test");
+        const example_step = b.step(example.name, "Run example test");
         example_step.dependOn(&run_example_test.step);
     }
 }

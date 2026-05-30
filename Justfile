@@ -11,7 +11,7 @@ test:
     zig build test --summary all
 
 example name='add':
-    zig build example-{{ name }} --summary all
+    zig build {{ name }} --summary all
 
 clean:
     rm -rf .zig-cache zig-out .hegel hegel*.log
